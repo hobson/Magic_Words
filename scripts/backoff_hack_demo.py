@@ -17,16 +17,19 @@ Then, we will perform Greedy Coordinate Gradient search for prompt length 4, 6,
 8, and 10 (also in Appendix B of https://arxiv.org/abs/2310.04444).  We will
 continue checking at each length for the argmax condition, and return. 
 """
-import pdb
 import argparse
 
-import torch 
-import numpy as np
+import torch
 from magic_words import backoff_hack_qa_ids
 
 
 import transformers
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+#  cpu cuda ipu xpu mkldnn opengl opencl ideep hip ve fpga ort xla lazy vulkan mps meta hpu mtia private
+# DEVICE not used anywhere, but needs to be used in place of device_map='auto'
+DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
 
 """ Demonstration of the backoff script -- same 
 """
@@ -34,9 +37,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 parser = argparse.ArgumentParser()
 # Add the argument
 parser.add_argument('--model', choices=['falcon-7b', 'falcon-40b', 'llama-7b', 'gpt-2-small'],
-                    help='The model to use (falcon-7b, falcon-40b, llama-7b, or gpt-2-small)', 
+                    help='The model to use (falcon-7b, falcon-40b, llama-7b, or gpt-2-small)',
                     default='falcon-7b')
-#seed argument -- int, default to 42
+# seed argument -- int, default to 42
 parser.add_argument('--seed', type=int, default=42, help='The random seed to use with torch (default: 42). Used in GCG algorithm sampling.')
 args = parser.parse_args()
 
@@ -56,7 +59,7 @@ if args.model == 'falcon-7b':
         tokenizer=tokenizer,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto",
+        #        device_map="auto",  # requries torch+cuda, accelerate, einops, and NVIDIA GPU
     )
     model = pipeline.model
     model.eval()
@@ -72,41 +75,37 @@ elif args.model == 'falcon-40b':
         tokenizer=tokenizer,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto",
+        #        device_map="auto",
     )
     model = pipeline.model
     model.eval()
     print("Done loading model and tokenizer!\n")
-elif args.model == 'llama-7b': 
+elif args.model == 'llama-7b':
     model_name = "huggyllama/llama-7b"
     print(f"Loading model {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, 
-                                            add_bos_token=False,
-                                            add_eos_token=False)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        add_bos_token=False,
+        add_eos_token=False)
     tokenizer.bos_token = ''
     tokenizer.eos_token = ''
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-    model = model.half() # convert to fp16 for fast inference.
+    model = AutoModelForCausalLM.from_pretrained(model_name)  # , device_map="auto")
+    model = model.half()  # convert to fp16 for fast inference.
     model.eval()
     print("Done loading model and tokenizer!\n")
-elif args.model == "gpt-2-small": 
+elif args.model == "gpt-2-small":
     model_name = "gpt2"
     print(f"Loading model {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # set the pad token as the eos token for the tokenizer 
+    # set the pad token as the eos token for the tokenizer
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_name)
-    model = model.to('cuda')
+    model = model.to(DEVICE)
     model = model.half()
     model.eval()
-else: 
+else:
     # exception: model not found
     raise ValueError(f"Model `{args.model}` not found. Please choose from `falcon-7b`, `falcon-40b`, `llama-7b`, or `gpt-2-small`.")
-
-
-
-
-
 
 
 # Get the question-answer pair
@@ -119,13 +118,12 @@ print("ANSWER: ", answer, "\n")
 question_ids = tokenizer.encode(question, return_tensors="pt").to(model.device)
 answer_ids = tokenizer.encode(answer, return_tensors="pt").to(model.device)
 
-if not (answer_ids.shape[0] == answer_ids.shape[1] == 1): # must be only 1 answer token!
+if not (answer_ids.shape[0] == answer_ids.shape[1] == 1):  # must be only 1 answer token!
     print(f"[WARNING] Answer `{answer}` does not correspond to a single token (encoded = {answer_ids})")
     # print(f"[WARNING] Cutting off answer_ids at the first token.")
     # answer_ids = answer_ids[:, 1:2]
     answer = tokenizer.decode(answer_ids[0].tolist())
     print("[WARNING] New answer: ", answer, "\tAnswer ids: ", answer_ids)
-
 
 
 # question_ids = torch.tensor([[204, 23, 1684, 25, 204, 28245, 56647, 64619]], dtype=torch.int64)
@@ -135,7 +133,7 @@ print("Question ids: ", question_ids)
 print("Answer ids: ", answer_ids)
 
 # Call backoff hack on the question-answer pair
-return_dict = backoff_hack_qa_ids(question_ids, answer_ids, model, tokenizer, greedy_lengths = [], gcg_lengths=[8, 12, 20, 30])
+return_dict = backoff_hack_qa_ids(question_ids, answer_ids, model, tokenizer, greedy_lengths=[], gcg_lengths=[8, 12, 20, 30])
 print("Return dictionary: ", return_dict)
 
 optimal_prompt_str = tokenizer.batch_decode(return_dict['optimal_prompt'])[0]
@@ -143,15 +141,9 @@ optimal_prompt_str = tokenizer.batch_decode(return_dict['optimal_prompt'])[0]
 print("\n\nDecoded Optimal prompt (u): ", optimal_prompt_str)
 print("Optimal prompt length (tokens, |u|): ", return_dict['optimal_prompt_length'])
 print("Prompt loss: ", return_dict['prompt_loss'])
-if return_dict['prompt_correct']: 
+if return_dict['prompt_correct']:
     print("Prompt is correct!")
     print(f"\nTHEREFORE: `{answer}` = argmax_a P(a | `{optimal_prompt_str}` + `{question}`)")
-else: 
+else:
     print("Unable to find an optimal prompt that gets the correct answer.\nConsider increasing the maximum allowable prompt length :)")
     print("\nBest prompt found: ", optimal_prompt_str)
-
-
-
-
-
-
